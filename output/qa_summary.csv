@@ -1,7 +1,9 @@
-asset,source,raw_rows,rows_after_exact_dedup,exact_duplicates_dropped,unique_dates,ohlc_invalid_rows,out_of_order_raw,missing_vs_union_calendar
-BTCUSD,binance,123,120,3,120,1,False,0
-BTCUSD,kraken,120,120,0,120,1,True,0
-BTCUSD,coinbase,113,113,0,113,1,False,7
-ETHUSD,binance,123,120,3,120,1,False,0
-ETHUSD,kraken,120,120,0,120,1,True,0
-ETHUSD,coinbase,113,113,0,113,1,False,7
+asset,source,raw_rows,rows_after_exact_dedup,exact_duplicates_dropped,unique_dates,ohlc_invalid_rows,invalid_reference_rows,out_of_order_raw,missing_vs_expected_calendar
+BTCUSD,reference,120,120,0,120,,0,False,0
+BTCUSD,binance,123,120,3,120,1,,False,0
+BTCUSD,kraken,120,120,0,120,1,,True,0
+BTCUSD,coinbase,113,113,0,113,1,,False,7
+ETHUSD,reference,120,120,0,120,,0,False,0
+ETHUSD,binance,123,120,3,120,1,,False,0
+ETHUSD,kraken,120,120,0,120,1,,True,0
+ETHUSD,coinbase,113,113,0,113,1,,False,7

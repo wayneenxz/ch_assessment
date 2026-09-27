@@ -2,39 +2,46 @@
 
 ## Objective
 
-The aim is to produce one daily BTCUSD and ETHUSD record that Finance/Risk can trace to a real source, reproduce from the supplied files, and challenge when the inputs disagree. I do not treat any input—including the reference feed—as inherently correct. The final output keeps a coherent venue OHLC candle rather than publishing a field-by-field median, while the median is used as validation evidence.
+The output is one daily BTCUSD/ETHUSD record that Finance and Risk can trace to a real source, reproduce from the supplied files, and challenge when inputs disagree. I do not assume that any source—including the reference feed—is always correct. A published record retains one coherent venue OHLC candle; a robust median is validation evidence, not a synthetic output price.
 
 ## Source roles and assumptions
 
-Kraken is the preferred OHLC and base-volume source because it has the strongest observed coverage and quality in the sample. Coinbase is the first price fallback when Kraken’s candle is invalid. Binance is a corroborating and last-resort source: it has timezone-aware `+08:00` timestamps while the other inputs are date-labelled, so the source’s stated calendar date is retained rather than silently shifted to UTC. The external reference is an independent close-price check, not an override.
+Kraken is the preferred price and reported base-volume source. Coinbase is the price fallback when a valid candle is independently corroborated. Binance remains subject to duplicate, stale-record, structural and gross-outlier checks, and is a fallback for reported base volume. However, it is excluded from automatic same-day price consensus: its timestamps use `+08:00` while the other supplied feeds are date-labelled, and no common daily-session contract is provided.
 
-The supplied Coinbase volume appears to be on a quote-currency scale. The pipeline therefore derives an approximate base volume as `volume / close` only for comparison or a last-resort fallback, and documents that inference in the breaks report. In production I would require source documentation or VWAP/transaction data before treating this conversion as exact.
+The reference feed is an independent close-price check, not an override. It is validated for invalid dates, duplicate dates and non-positive closes before it can corroborate a venue.
 
-## Normalization and quality controls
+Coinbase volume is diagnostic-only. The supplied unit is not documented, so dividing a daily amount by close would be only an approximation; it can differ from actual base volume without VWAP, transaction data, or a source contract. The pipeline therefore never publishes Coinbase volume as `volume_base`.
 
-Each source is mapped to a normalized business date and common OHLCV fields. The process is deterministic:
+## Normalization and controls
 
-1. Parse dates and retain Binance’s reported business-date label.
-2. Detect out-of-order raw files, then sort by the normalized date.
-3. Remove exact duplicate rows idempotently; block conflicting non-identical rows for the same business date.
-4. Validate every candle before it can provide a price: all OHLC values must be finite and positive; `high >= low`; `high >= max(open, close)`; and `low <= min(open, close)`.
-5. Validate that volume is finite and positive, and identify repeated full candles as possible stale/carry-forward data.
-6. Build a calendar from the union of observed source dates and record source-specific missing dates.
+Each source is mapped to a normalized business date and common fields. Binance’s reported date label is preserved rather than silently shifted to UTC. Price and volume fields are converted with invalid values coerced to missing values, ensuring malformed future data is visible.
 
-`CHECKS.sql` expresses the duplicate, completeness, invalid OHLC and invalid-volume controls in one reusable SQL template. The first CTE is the only source adapter: it maps a source table into a common schema. This keeps the check definitions consistent when profiling a new source. The SQL is a supplementary validation artefact; `reconcile.py` is the executable pipeline.
+The pipeline then records and handles:
 
-## Reconciliation and materiality
+1. invalid/unparseable dates;
+2. out-of-order source files (sorted after recording the condition);
+3. exact duplicate rows (later copies removed idempotently);
+4. conflicting duplicate business dates (the source/date is blocked);
+5. invalid candles: non-finite/non-positive OHLC, `high < low`, high below open/close, or low above open/close;
+6. invalid/non-positive volume; and
+7. exact carry-forward OHLCV records on consecutive dates.
 
-For each asset/day, the script calculates a robust median close across available positive source closes. It uses the median as a benchmark, not as a published price, because a median is less distorted by one extreme bad observation than a mean while a venue candle preserves provenance.
+For each asset, the expected calendar is every daily date from the earliest to latest usable observation. This is stronger than an observed-date union: a date omitted by every feed is still visible. Missing dates are written per source to the breaks report.
 
-A difference above **0.50%** is recorded as a material close disagreement. A difference above **20%** is a gross price outlier. These thresholds are reporting and safety controls: a source remains preferred only if its candle is structurally valid and its close is within the script’s 5% gross-deviation guard. The price priority is Kraken, then Coinbase, then Binance. If no candidate passes structural and deviation checks, the output fails closed as `excluded` rather than inventing a value.
+`CHECKS.sql` is a reusable centralized profiling template. Its first CTE maps a raw/normalized source to a shared schema; the remaining query performs identical duplicate, completeness, invalid-OHLC and invalid-volume checks for every source. It is supplementary QA evidence; `reconcile.py` is the executable reconciliation process.
 
-Volume is selected separately from OHLC. A positive known base-unit volume is preferred, so a valid Kraken volume can be retained even when an invalid Kraken candle forces a Coinbase OHLC fallback. The `source` field makes such cases explicit, for example `coinbase_ohlc+kraken_volume`.
+## Price reconciliation and materiality
 
-The reference feed is treated as evidence rather than authority. If it differs materially while the venue prices agree, the discrepancy is reported and the venue candle remains the trusted record. Conversely, a source with a bad candle or a large deviation cannot become trusted merely because it is high priority.
+For each asset/day, the comparable diagnostic benchmark is the median of valid Kraken, Coinbase and reference closes. A venue close joins that benchmark only when its complete OHLC candle passes structural checks. Binance does not join because same-session comparability has not been established.
 
-## Output, controls and limitations
+The 0.50% threshold means independent agreement. Kraken is selected only if valid Coinbase or valid reference agrees within 0.50%. Otherwise Coinbase is selected only if Kraken or reference agrees within 0.50%. If neither candidate has such corroboration, the price is excluded rather than accepted using a looser tolerance. Source priority chooses among valid candidates; it does not make a value trustworthy by itself.
 
-The pipeline writes the trusted dataset alongside a detailed breaks report, a break summary, source-level QA, and final control totals. Before output is written it asserts unique `asset/date` rows, expected row count, positive non-excluded prices and volume, and valid OHLC relationships. These checks make a silent bad publish fail visibly.
+Comparable differences above 0.50% are reported as material. Binance is automatically reported for an unmistakable gross outlier only (>20% versus the comparable median), because smaller differences may reflect the unconfirmed session boundary. A reference disagreement is recorded but does not replace two agreeing venue prices.
 
-The main limitations are the absence of formal source metadata for daily-session boundaries and volume units. The submission preserves those uncertainties in the method and breaks report rather than resolving them through unsupported assumptions. In production, I would obtain the venue session definitions, volume semantics and official instrument metadata, then add scheduled ingestion, data lineage, monitoring and escalation for excluded or material-break records.
+## Volume, provenance and outputs
+
+Volume is reconciled separately from OHLC. The pipeline uses positive reported base-unit volume in order: Kraken, then Binance. A valid Kraken volume may be retained even if an invalid Kraken candle forces a Coinbase price fallback, because candle validity and volume validity are separate field-level controls. If no reported base-unit volume is available, the record fails closed as excluded. Provenance makes this explicit, e.g. `coinbase_ohlc+kraken_volume`.
+
+Before writing output, the pipeline asserts expected row count, unique asset/date keys, positive non-excluded OHLC and volume, and valid high/low relationships. It writes the trusted dataset plus a detailed breaks report, break summary, source QA summary, and control totals.
+
+The principal limitations are missing formal definitions for daily-session alignment and volume semantics. Rather than hiding those gaps through conversion or timestamp assumptions, the submission records them explicitly. In production I would obtain venue session definitions, volume metadata and official identifiers, then add lineage, monitoring and escalation for material breaks or exclusions.
