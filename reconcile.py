@@ -21,9 +21,9 @@ import pandas as pd
 ASSETS = ["BTCUSD", "ETHUSD"]
 VENUES = ["binance", "kraken", "coinbase"]
 PRICE_FIELDS = ["open", "high", "low", "close"]
-MATERIALITY_PCT = 0.50
-MAX_TRUST_DEVIATION_PCT = 5.00
-GROSS_OUTLIER_PCT = 20.00
+MATERIALITY_PCT = 0.50 # materiality threshold for price deviation from consensus (median)
+MAX_TRUST_DEVIATION_PCT = 5.00 # maximum allowed deviation from consensus for a source to be trusted
+GROSS_OUTLIER_PCT = 20.00 # if a source's price deviates more than this from consensus, it is flagged as a gross outlier
 
 
 # Calculate an absolute percentage difference for consensus and materiality checks.
@@ -43,6 +43,7 @@ def normalize_date(df: pd.DataFrame, source: str) -> pd.Series:
     the source instead of silently shifting it to the prior UTC day. In production this
     should be confirmed against the venue data contract.
     """
+    # binance timestamp e.g. "2023-01-01T00:00:00.000+08:00", will be normalized to "2023-01-01" and converted to pandas datetime
     if source == "binance":
         return pd.to_datetime(df["timestamp"].astype(str).str[:10], errors="coerce")
     if source == "kraken":
@@ -58,16 +59,22 @@ def normalize_date(df: pd.DataFrame, source: str) -> pd.Series:
 # Return an explainable reason that can be written to the breaks report.
 def row_ohlc_valid(row: pd.Series) -> Tuple[bool, str]:
     values = {f: row.get(f, np.nan) for f in PRICE_FIELDS}
+    # reject if missing or infinite values
     if any(pd.isna(v) or not np.isfinite(v) for v in values.values()):
         return False, "missing_or_nonfinite_price"
+    # reject if any price is nonpositive
     if any(v <= 0 for v in values.values()):
         return False, "nonpositive_price"
+    # reject if high < low
     if values["high"] < values["low"]:
         return False, "high_below_low"
+    # reject if high < max(open, close)
     if values["high"] < max(values["open"], values["close"]):
         return False, "high_below_open_or_close"
+    # reject if low > min(open, close)
     if values["low"] > min(values["open"], values["close"]):
         return False, "low_above_open_or_close"
+    # otherwise, the row is structurally valid
     return True, "ok"
 
 
@@ -88,6 +95,7 @@ def add_break(breaks: List[dict], **kwargs) -> None:
         "blocks_source_value": False,
         "details": "",
     }
+    # updates the breaks list with the provided keyword arguments, allowing for flexible addition of break records
     template.update(kwargs)
     breaks.append(template)
 
@@ -95,8 +103,12 @@ def add_break(breaks: List[dict], **kwargs) -> None:
 # Load, standardize, deduplicate, and validate all venue and reference inputs.
 # Return normalized frames plus source-level QA evidence for later reconciliation.
 def load_and_normalize(input_dir: Path, breaks: List[dict]):
+
+    # normalized is a dictionary that maps (asset, source) tuples to their corresponding normalized DataFrames
     normalized: Dict[Tuple[str, str], pd.DataFrame] = {}
+    # refs is a dictionary that maps asset strings to their corresponding reference DataFrames
     refs: Dict[str, pd.DataFrame] = {}
+    # qa_rows will hold a list of dictionaries containing QA information for each asset and source combination
     qa_rows: List[dict] = []
 
     for asset in ASSETS:
@@ -105,18 +117,21 @@ def load_and_normalize(input_dir: Path, breaks: List[dict]):
         ref["date_norm"] = normalize_date(ref, "reference")
         ref["source"] = "reference"
         ref["asset"] = asset
+        # add a boolean column to indicate whether the reference close price is valid (numeric and positive)
         ref["reference_valid"] = (
             pd.to_numeric(ref["reference_close_usd"], errors="coerce").notna()
             & (ref["reference_close_usd"] > 0)
         )
         refs[asset] = ref.sort_values("date_norm").reset_index(drop=True)
 
+        # venue feeds (binance, kraken, coinbase)
         for source in VENUES:
             raw = pd.read_csv(input_dir / f"{source}_{asset}.csv")
             raw_rows = len(raw)
             raw["date_norm"] = normalize_date(raw, source)
 
             # Out-of-order detection before sorting.
+            # if not in order by normalized date, add a break, but do not block the source value; rows will be sorted during normalization
             out_of_order = not raw["date_norm"].is_monotonic_increasing
             if out_of_order:
                 add_break(
@@ -132,6 +147,7 @@ def load_and_normalize(input_dir: Path, breaks: List[dict]):
                 )
 
             # Exact duplicate rows, including source timestamp/date.
+            # if identical rows with same source date, we merely keep the first instance
             dup_mask = raw.duplicated(keep="first")
             dup_rows = int(dup_mask.sum())
             if dup_rows:
@@ -152,6 +168,7 @@ def load_and_normalize(input_dir: Path, breaks: List[dict]):
             df = df.sort_values("date_norm").reset_index(drop=True)
 
             # Date uniqueness after exact-dedup. If conflicting duplicates remain, block them.
+            # same normalized date with non-identical OHLC/volume values, we block because we cannot decide which is correct
             conflicting_dup_dates = df["date_norm"].duplicated(keep=False)
             if conflicting_dup_dates.any():
                 for d, group in df.loc[conflicting_dup_dates].groupby("date_norm"):
@@ -170,6 +187,7 @@ def load_and_normalize(input_dir: Path, breaks: List[dict]):
                 df = df.loc[~conflicting_dup_dates].copy()
 
             # Structural validation and normalized volume.
+            # output boolean columns for OHLC and volume validity, and reasons for any OHLC invalidity
             validity, reasons = [], []
             for _, row in df.iterrows():
                 ok, reason = row_ohlc_valid(row)
@@ -198,6 +216,8 @@ def load_and_normalize(input_dir: Path, breaks: List[dict]):
             # systematically orders of magnitude larger and behaves like USD quote volume;
             # use close as an approximate conversion only for comparison/fallback.
             if source == "coinbase":
+                # infer base volume by dividing quote USD volume by close price, but only if both OHLC and volume are valid; otherwise, set to NaN
+                # in standard practice, this would be a temporary measure until the source provides base volume or VWAP metadata
                 df["volume_base"] = np.where(
                     df["ohlc_valid"] & df["volume_valid"], df["volume"] / df["close"], np.nan
                 )
@@ -260,12 +280,16 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
     breaks: List[dict] = []
     normalized, refs, qa = load_and_normalize(input_dir, breaks)
 
+    # trusted_rows will hold the final reconciled data for each asset/date, including OHLC and volume values, source information, and confidence levels
     trusted_rows: List[dict] = []
+    # calendar_control will hold information about the union calendar for each asset, including the number of days in the union calendar and the expected number of trusted rows
     calendar_control: List[dict] = []
 
+    # for every asset, build a continuous union calendar from the earliest to latest observed date
     for asset in ASSETS:
         ref = refs[asset].copy()
         ref_idx = ref.set_index("date_norm")
+        # the reference and venue dataframes are indexed by normalized date for easy lookup during reconciliation
         venue_idx = {
             source: normalized[(asset, source)].set_index("date_norm") for source in VENUES
         }
@@ -278,6 +302,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
         calendar = pd.DatetimeIndex(sorted(calendar_dates))
 
         # Missing-date controls against the union calendar.
+        # for each source, the code checks if any dates in the union calendar are missing from that source's index, and if so, it adds a break record indicating the missing date
         source_indexes = {**venue_idx, "reference": ref_idx}
         for source, idx in source_indexes.items():
             present = set(idx.index)
@@ -295,7 +320,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
                     blocks_source_value=True,
                     details="Date is present in the union calendar but absent from this source.",
                 )
-
+        # for one asset-date , the script gathers positive close prices from binance, kraken, coinbase and reference
         for d in calendar:
             # Build field-level valid close observations for robust consensus.
             close_obs = []
@@ -308,7 +333,8 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
             ref_close = float(ref_idx.loc[d, "reference_close_usd"]) if d in ref_idx.index else np.nan
             if np.isfinite(ref_close) and ref_close > 0:
                 close_obs.append(("reference", ref_close))
-
+            # consensus close is the median of those gathered close values
+            # median is primarily a comparison benchmark and not the price published into the final dataset
             consensus_close = float(np.median([v for _, v in close_obs])) if close_obs else np.nan
 
             # Detailed material close breaks.
@@ -344,6 +370,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
             # synthesizing field-wise medians. Primary is Kraken based on observed quality.
             price_source = None
             selected = None
+            # for each candidate source, check if 1) date exist, 2) OHLC structure valid, 3) close within maximum trust deviation from consensus
             for source in ["kraken", "coinbase", "binance"]:
                 if d not in venue_idx[source].index:
                     continue
@@ -356,6 +383,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
                 selected = row
                 break
 
+            # result is not forced if no valid price source is found
             if price_source is None:
                 trusted_rows.append(
                     {
@@ -385,6 +413,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
                 continue
 
             # Volume selection is field-specific. Keep known base-unit volume when possible.
+            # prefer actual base-unit volume from Kraken / Binance over the inferred Coinbase conversion where possible
             volume_source = None
             volume_base = np.nan
             for source in [price_source, "kraken", "binance", "coinbase"]:
@@ -399,6 +428,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
                         break
 
             # Independent corroboration of selected close at materiality threshold.
+            # checks whether another independent source agrees with the selected close within the materiality threshold
             corroborators = []
             for source, close in close_obs:
                 if source == price_source:
@@ -407,6 +437,8 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
                     corroborators.append(source)
 
             # Detect reference break specifically: reference disagrees, while >=2 venues agree.
+            # checks for cases where the reference differs materially from the venue consensus and at least two venues agree closely with each other
+            # in case the reference is the anomalous source
             venue_closes = [
                 (source, close) for source, close in close_obs if source in VENUES
             ]
@@ -420,6 +452,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
                     reference_break_resolved = agreeing_venues >= 2
 
             confidence = "ok"
+            # set to adjusted when intervention occurs, such as falling back from Kraken, combining OHLC and volume from different sources and resolving a material reference-feed discrepancy
             if price_source != "kraken" or volume_source != price_source or reference_break_resolved:
                 confidence = "adjusted"
             if len(corroborators) == 0:
@@ -427,6 +460,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
 
             if volume_source == price_source:
                 source_label = price_source
+            # if row comes from different venues, the mixed provenance is made explicit
             else:
                 source_label = f"{price_source}_ohlc+{volume_source}_volume"
 
@@ -444,6 +478,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
                 }
             )
 
+        # controls are used to ensure dates were not silently lost during transformation
         calendar_control.append(
             {
                 "asset": asset,
@@ -461,6 +496,7 @@ def reconcile(input_dir: Path, output_dir: Path) -> None:
         breaks_df.insert(0, "break_id", [f"BRK-{i:04d}" for i in range(1, len(breaks_df) + 1)])
 
     # Final trusted-output controls.
+    # if any fail,the script stops rather than writing the final dataset
     expected_rows = sum(x["trusted_rows_expected"] for x in calendar_control)
     assert len(trusted) == expected_rows, f"Trusted row count {len(trusted)} != expected {expected_rows}"
     assert not trusted.duplicated(["asset", "date"]).any(), "Duplicate asset/date in trusted output"
