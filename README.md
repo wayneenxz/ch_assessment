@@ -1,4 +1,4 @@
-# Coinhako data-reconciliation take-home
+# Data recociliation
 
 This submission reconciles daily BTCUSD and ETHUSD data from Binance, Kraken, Coinbase and an external reference feed. It publishes a traceable venue candle rather than a synthetic price and records source exceptions separately.
 
