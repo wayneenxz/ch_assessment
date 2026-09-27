@@ -1,0 +1,12 @@
+source,break_type,severity,break_count
+binance,gross_price_outlier,critical,2
+binance,invalid_ohlc,critical,2
+coinbase,invalid_ohlc,critical,2
+kraken,invalid_ohlc,critical,2
+coinbase,missing_date,high,14
+kraken,out_of_order_dates,low,2
+binance,exact_duplicate_row,medium,6
+binance,material_close_disagreement,medium,96
+binance,repeated_full_candle,medium,2
+coinbase,volume_unit_inference,medium,2
+reference,material_close_disagreement,medium,2
