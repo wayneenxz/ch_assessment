@@ -15,6 +15,7 @@ python reconcile.py --input-dir .\reconciliation_data --output-dir .\output
 
 - `reconcile.py` — deterministic normalization, validation and reconciliation pipeline.
 - `METHOD.md` — concise methodology, assumptions, controls and limitations.
+- `TRUSTWORTHINESS.md` — guarantees and control evidence for downstream Finance/Risk use.
 - `CHECKS.sql` — reusable centralized SQL profiling controls.
 - `output/trusted_dataset.csv` — trusted records in the required schema: `date, asset, open, high, low, close, volume_base, source, confidence`.
 - `output/breaks_report.csv` — source-level discrepancies, severity, action and likely cause.
