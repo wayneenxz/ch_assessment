@@ -3,5 +3,6 @@ trusted_row_count,240,PASS
 trusted_unique_asset_date,240,PASS
 excluded_rows,0,PASS
 adjusted_rows,4,INFO
+review_rows,0,PASS
 trusted_ohlc_valid,240,PASS
 trusted_volume_positive,240,PASS
